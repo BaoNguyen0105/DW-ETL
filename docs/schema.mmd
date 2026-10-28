@@ -1,0 +1,72 @@
+erDiagram
+    dim_customer ||--o{ fact_order_items : "has (customer_key)"
+    dim_seller ||--o{ fact_order_items : "fulfills (seller_key)"
+    dim_product ||--o{ fact_order_items : "contains (product_key)"
+    dim_date ||--o{ fact_order_items : "purchased_at (purchase_date_key)"
+    dim_date ||--o{ fact_order_items : "delivered_at (delivered_date_key)"
+    dim_date ||--o{ fact_order_items : "estimated_at (estimated_date_key)"
+
+    fact_order_items {
+        int order_item_key PK "Surrogate Primary Key"
+        string order_id "Degenerate Dimension"
+        int order_item_id "Degenerate Dimension (Line Number)"
+        string order_status "Degenerate Dimension"
+        int customer_key FK "References dim_customer"
+        int seller_key FK "References dim_seller"
+        int product_key FK "References dim_product"
+        int purchase_date_key FK "References dim_date"
+        int delivered_date_key FK "References dim_date"
+        int estimated_date_key FK "References dim_date"
+        double price "Metric: Item Price"
+        double freight_value "Metric: Shipping Cost"
+        double total_item_value "Metric: Price + Freight"
+        int delivery_delay_days "Metric: Delivery vs Estimate Days"
+        int review_score "Metric: 1 to 5 Stars"
+    }
+
+    dim_customer {
+        int customer_key PK "Surrogate Primary Key"
+        string customer_id "Natural Key (Order-level)"
+        string customer_unique_id "Human/Account Key"
+        int customer_zip_code_prefix "Zip Code Prefix"
+        string customer_city "City Name"
+        string customer_state "State Code"
+        double latitude "Representative Latitude"
+        double longitude "Representative Longitude"
+    }
+
+    dim_seller {
+        int seller_key PK "Surrogate Primary Key"
+        string seller_id "Natural Key"
+        int seller_zip_code_prefix "Zip Code Prefix"
+        string seller_city "City Name"
+        string seller_state "State Code"
+        double latitude "Representative Latitude"
+        double longitude "Representative Longitude"
+    }
+
+    dim_product {
+        int product_key PK "Surrogate Primary Key"
+        string product_id "Natural Key"
+        string product_category_name "Portuguese Category"
+        string product_category_name_english "English Category"
+        int product_name_length "Name Character Count"
+        int product_description_length "Description Character Count"
+        int product_photos_qty "Number of Photos"
+        double product_weight_g "Weight (grams)"
+        double product_length_cm "Length (cm)"
+        double product_height_cm "Height (cm)"
+        double product_width_cm "Width (cm)"
+    }
+
+    dim_date {
+        int date_key PK "Surrogate Key (YYYYMMDD)"
+        date full_date "Standard Date (YYYY-MM-DD)"
+        int year "Calendar Year"
+        int quarter "Quarter (1-4)"
+        int month "Month (1-12)"
+        string month_name "Full Month Name"
+        int day "Day of Month (1-31)"
+        string day_of_week "Day Name (Monday-Sunday)"
+        boolean is_weekend "True if Saturday or Sunday"
+    }

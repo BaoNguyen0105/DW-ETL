@@ -1,0 +1,14 @@
+# Dữ liệu nặng
+dataset/
+data_warehouse/
+*.zip
+*.parquet
+
+# Virtual environment & cache
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Local tools (JDK 17 & Hadoop winutils)
+tools/
