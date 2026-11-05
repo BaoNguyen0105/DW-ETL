@@ -6,7 +6,7 @@ Tài liệu hướng dẫn nội bộ dành cho thành viên phát triển **Fro
 
 ## ⚡ 1. Hướng dẫn Chạy Nhanh (Setup & Run)
 
-Chỉ cần làm theo 4 bước dưới đây để có đầy đủ Database và Backend API chạy trên máy:
+Chỉ cần làm theo 5 bước dưới đây để có đầy đủ Database, Models và Backend API chạy trên máy:
 
 ### Bước 1: Kích hoạt Virtual Environment & Cài thư viện
 ```powershell
@@ -14,7 +14,7 @@ Chỉ cần làm theo 4 bước dưới đây để có đầy đủ Database v�
 python -m venv .venv
 .venv\Scripts\activate
 
-# Cài đặt dependencies
+# Cài đặt toàn bộ dependencies (PySpark, DuckDB, FastAPI, LightGBM, Scikit-learn,...)
 pip install -r requirements.txt
 ```
 
@@ -25,62 +25,61 @@ python setup_env.py
 ```
 
 ### Bước 3: Chạy ETL để sinh Data Warehouse
-Chạy pipeline để tự động kéo data Olist từ Kaggle về, transform và xuất ra các file Parquet:
+Chạy pipeline để tự động tải bộ dữ liệu Olist từ Kaggle về, transform và xuất ra các file Parquet:
 ```powershell
 python -m etl
 ```
 *(Sau khi chạy xong, dữ liệu Star Schema sẽ nằm sẵn trong thư mục `data_warehouse/`).*
 
-### Bước 4: Khởi động Backend API
+### Bước 4: Huấn luyện và sinh Artifacts cho DSS (Chỉ chạy 1 lần hoặc khi train lại)
+Huấn luyện 2 mô hình (Dự báo rủi ro giao hàng trễ & Dự báo chuỗi thời gian doanh số), tự động lưu kết quả vào `dss/artifacts/`:
+```powershell
+python -m dss
+```
+
+### Bước 5: Khởi động Backend API
 ```powershell
 cd backend
 uvicorn main:app --reload --port 8000
 ```
 * **Base URL:** `http://localhost:8000`
-* **Swagger UI (Xem và test trực tiếp API):** [http://localhost:8000/docs](http://localhost:8000/docs)
+* **Swagger UI (Xem và test trực tiếp toàn bộ API OLAP & DSS):** [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ---
 
-## 🧠 2. Dành cho bạn làm DSS (Data & Model)
+## 🧠 2. Phân Hệ Hỗ Trợ Quyết Định (DSS Module)
 
-### Dữ liệu nằm ở đâu?
-Dữ liệu đã được chuẩn hóa theo mô hình Star Schema và lưu trữ dưới dạng **Parquet** trong thư mục `data_warehouse/`:
-* `data_warehouse/fact_order_items/`
-* `data_warehouse/dim_customer/`
-* `data_warehouse/dim_seller/`
-* `data_warehouse/dim_product/`
-* `data_warehouse/dim_date/`
+Mã nguồn DSS được tổ chức trong thư mục `dss/` và tích hợp vào Backend tại `backend/routers/dss.py`.
 
-### Cách đọc dữ liệu bằng Python (DuckDB / Pandas)
-Bạn có thể đọc trực tiếp các bảng Parquet thành Pandas DataFrame chỉ với vài dòng:
-```python
-import duckdb
+### Cấu trúc mô-đun:
+* `dss/features.py`: Định nghĩa và tính toán các đặc trưng:
+  * Khoảng cách địa lý **Haversine** từ tọa độ khách hàng và người bán.
+  * Tỷ lệ cước phí vận chuyển, khối lượng, kích thước bưu kiện.
+  * Lịch sử giao hàng trễ và điểm review của seller được làm mượt bằng **Laplace Smoothing**.
+  * Chuyển đổi biến phân loại (State, Category) với fallback chống Out-of-Vocabulary.
+* `dss/dss_pipeline.py`:
+  * **Bài toán 1 - Late Delivery Risk:** Dùng **LightGBM Classifier**, phân chia tập theo thời gian (Temporal Split) và chạy Backtesting chống rò rỉ dữ liệu (Data Leakage). Phân loại rủi ro thành 3 tầng: `low`, `medium`, `high`.
+  * **Bài toán 2 - Sales Forecasting:** Dự báo chuỗi thời gian cho 28 ngày kế tiếp (`orders` và `gmv`), khử mùa vụ và tính toán **Black Friday Uplift**, cung cấp khoảng tin cậy 80% (`lo` - `hi`).
+* `dss/artifacts/`: Thư mục chứa các file sau khi chạy `python -m dss`:
+  * `model.joblib`: Weights mô hình dự báo giao trễ & lookups.
+  * `sales_model.joblib` & `sales_forecast.json`: Dự báo doanh thu 28 ngày.
+  * `metrics.json` & `sales_metrics.json`: Các chỉ số đánh giá kỹ thuật (ROC-AUC, WAPE, Feature Importance).
+  * `example_orders.json`: Dữ liệu mẫu đơn hàng thực tế phục vụ Frontend thử nghiệm.
 
-con = duckdb.connect()
-
-# Đọc Fact kết hợp Dimension để lấy features train model
-df = con.execute("""
-    SELECT 
-        f.price,
-        f.freight_value,
-        f.delivery_delay_days,
-        f.review_score,
-        c.customer_state,
-        s.seller_state,
-        CASE WHEN c.customer_state != s.seller_state THEN 1 ELSE 0 END AS is_interstate,
-        p.product_category_name_english,
-        p.product_weight_g
-    FROM 'data_warehouse/fact_order_items/*.parquet' f
-    LEFT JOIN 'data_warehouse/dim_customer/*.parquet' c ON f.customer_key = c.customer_key
-    LEFT JOIN 'data_warehouse/dim_seller/*.parquet' s ON f.seller_key = s.seller_key
-    LEFT JOIN 'data_warehouse/dim_product/*.parquet' p ON f.product_key = p.product_key
-""").df()
+### Lệnh huấn luyện lại mô hình:
+```powershell
+python -m dss
 ```
 
 ---
 
 ## 🎨 3. Dành cho bạn làm Frontend (UI / Dashboard)
-### Các API OLAP có sẵn để gọi:
+
+Backend viết bằng FastAPI, đã bật sẵn **CORS** cho mọi domain (`allow_origins=["*"]`). Bạn có thể dùng Streamlit, React, Next.js, Vue hoặc HTML/JS thuần tùy ý.
+
+---
+
+### A. Các API Phân Tích OLAP (`/api/olap`)
 
 #### 1. Lấy dữ liệu cho các thẻ KPI (`/api/olap/kpis`)
 Dùng để hiển thị các con số tổng quan ở đầu Dashboard. Hỗ trợ bộ lọc Slice / Dice:
@@ -139,22 +138,92 @@ Dùng để vẽ bản đồ nhiệt (Heatmap) hoặc bảng phân tích theo 27
   ```
 
 #### 5. Danh sách các lựa chọn cho Dropdown Filter (`/api/olap/filters`)
-Dùng để load danh sách các năm, bang, ngành hàng đưa vào các thanh Dropdown chọn lựa:
+Dùng để nạp danh sách các năm, bang, ngành hàng vào các bộ lọc Dropdown:
 * **Method:** `GET`
 * **Response:**
   ```json
   {
     "years": [2016, 2017, 2018],
-    "states": ["SP", "RJ", "MG", ...],
-    "categories": ["health_beauty", "computers_accessories", ...]
+    "states": ["SP", "RJ", "MG"],
+    "categories": ["health_beauty", "computers_accessories"]
   }
   ```
 
 #### 6. Chạy câu truy vấn SQL tùy biến (`/api/olap/execute-query`)
-Dành cho trang **OLAP Query Console** (Cho phép giảng viên/người dùng nhập SQL và xem kết quả):
+Dành cho trang **OLAP Query Console** (Cho phép người dùng nhập SQL tùy biến và xem kết quả trực tiếp):
 * **Method:** `POST`
 * **Body:** `{"query": "SELECT c.customer_state, COUNT(*) FROM fact_order_items f JOIN dim_customer c ON f.customer_key = c.customer_key GROUP BY 1"}`
-* **Response:** Trả về danh sách records JSON và số dòng.
+* **Response:** Trả về danh sách records JSON và số lượng dòng.
+
+---
+
+### B. Các API Hỗ Trợ Quyết Định DSS (`/api/dss`)
+
+#### 1. Dự đoán rủi ro đơn hàng giao trễ (`/api/dss/predict-late-delivery`)
+Dùng cho Form đánh giá rủi ro đơn hàng mới:
+* **Method:** `POST`
+* **Body (JSON):**
+  ```json
+  {
+    "purchase_date": "2018-08-15",
+    "estimated_date": "2018-08-28",
+    "seller_id": "4a3ca9315b744ce9f8e9374361493884",
+    "category": "bed_bath_table",
+    "n_items": 1,
+    "total_price": 120.0,
+    "total_freight": 25.5,
+    "total_weight_g": 1200.0,
+    "total_volume_cm3": 8000.0,
+    "max_dim_cm": 30.0,
+    "c_lat": -23.5505,
+    "c_lng": -46.6333,
+    "c_state": "SP",
+    "s_lat": -22.9068,
+    "s_lng": -43.1729,
+    "s_state": "RJ"
+  }
+  ```
+* **Response:**
+  ```json
+  {
+    "late_probability": 0.3842,
+    "risk_tier": "high",
+    "thresholds": {
+      "medium": 0.12,
+      "high": 0.30
+    }
+  }
+  ```
+
+#### 2. Lấy dự báo bán hàng 28 ngày (`/api/dss/sales-forecast`)
+Dùng cho biểu đồ dự báo xu hướng tương lai:
+* **Method:** `GET`
+* **Params:** `target` (`"orders"` hoặc `"gmv"`, mặc định là `"orders"`)
+* **Ví dụ:** `/api/dss/sales-forecast?target=orders`
+* **Response:**
+  ```json
+  {
+    "target": "orders",
+    "horizon_days": 28,
+    "forecast": [
+      {
+        "date": "2018-09-04",
+        "forecast": 215.4,
+        "lo": 182.5,
+        "hi": 251.2,
+        "event": false
+      }
+    ]
+  }
+  ```
+
+#### 3. Lấy mẫu đơn hàng có sẵn để test nhanh (`/api/dss/example-orders`)
+Dùng để gắn nút bấm "Tải đơn hàng mẫu" trên giao diện, tự động điền form dự đoán:
+* **Method:** `GET`
+* **Response:** Trả về 5 đơn hàng mẫu thực tế kèm cờ `_actual_late`.
+
+#### 4. Các API Metrics mô hình (`/api/dss/late-delivery-metrics` & `/api/dss/sales-metrics`)
+Dùng để hiển thị bảng đánh giá độ chính xác của các mô hình DSS (ROC-AUC, Feature Importance, WAPE theo ngày/tuần).
 
 ---
 
@@ -165,6 +234,7 @@ Mô hình dữ liệu Star Schema chuẩn Ralph Kimball được lưu trữ tạ
 ![Star Schema](docs/schema.png)
 
 <details>
+<summary><b>🔍 Bấm để xem chi tiết mã nguồn Mermaid (Schema ERD)</b></summary>
 
 ```mermaid
 erDiagram
