@@ -1,20 +1,75 @@
-# Dữ liệu nặng
-dataset/
-data_warehouse/
-*.zip
+# Raw data, generated warehouse and trained models
+/dataset/
+/data_warehouse/
+/dss/artifacts/
 *.parquet
+*.joblib
+*.zip
 
-# Virtual environment & cache
+# Local Java / Hadoop installation
+/tools/
+
+# Local review and regression test workspace
+/review/
+/tests/
+
+# Python environments and caches
 .venv/
+venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .ipynb_checkpoints/
 
-# Local tools (JDK 17 & Hadoop winutils)
-tools/
+# Node dependencies, build output and Vite / TypeScript caches
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+*.tsbuildinfo
 
-# Model
-*.joblib
-*.json
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.kaggle/
+kaggle.json
 
-docs/
+# Test reports, coverage and temporary QA output
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.qa/
+
+# Runtime files and logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+spark-warehouse/
+metastore_db/
+
+# Local editor and operating system files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# Keep docs/, source JSON configs, package-lock.json and .env.example.

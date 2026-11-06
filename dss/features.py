@@ -29,6 +29,71 @@ CAT_FEATURES = [
 FEATURES = NUM_FEATURES + CAT_FEATURES
 MIN_CATEGORY_COUNT = 300
 SMOOTHING_K = 10
+REVIEW_LAG_DAYS = 7
+DEFAULT_LATE_PRIOR = 0.10
+DEFAULT_REVIEW_PRIOR = 3.0
+
+
+def _timeline(known_at: pd.Series, values: pd.Series) -> dict:
+    events = pd.DataFrame({"known_at": pd.to_datetime(known_at), "value": values})
+    events = events.dropna().sort_values("known_at")
+    return {
+        "known_at": events["known_at"].to_numpy(dtype="datetime64[ns]"),
+        "sum": events["value"].astype(float).cumsum().to_numpy(),
+    }
+
+
+def _past_totals(timeline: dict, dates: pd.Series):
+    n = np.searchsorted(timeline["known_at"], pd.to_datetime(dates).to_numpy(dtype="datetime64[ns]"), side="left")
+    total = np.zeros(len(n), dtype=float)
+    has_history = n > 0
+    total[has_history] = timeline["sum"][n[has_history] - 1]
+    return n.astype(float), total
+
+
+def build_history_lookups(df: pd.DataFrame) -> dict:
+    """Index outcomes by availability, not by purchase date.
+
+    Review timestamps are absent from the warehouse; delivery + 7 days is an
+    explicit approximation. Missing scores never count as observed reviews.
+    """
+    def timelines(rows):
+        delivered = pd.to_datetime(rows["delivered_date"])
+        return {
+            "late": _timeline(delivered, rows["late"]),
+            "review": _timeline(delivered + pd.Timedelta(days=REVIEW_LAG_DAYS), rows["review_score"]),
+        }
+
+    return {
+        "global_history": timelines(df),
+        "seller_history": {seller: timelines(rows) for seller, rows in df.groupby("seller_id")},
+        "smoothing_k": SMOOTHING_K,
+    }
+
+
+def historical_seller_features(raw: pd.DataFrame, lookups: dict) -> pd.DataFrame:
+    dates = raw["purchase_date"]
+    priors = {}
+    for name, fallback in (("late", DEFAULT_LATE_PRIOR), ("review", DEFAULT_REVIEW_PRIOR)):
+        n, total = _past_totals(lookups["global_history"][name], dates)
+        priors[name] = np.divide(total, n, out=np.full(len(raw), fallback), where=n > 0)
+
+    counts = {name: np.zeros(len(raw)) for name in ("late", "review")}
+    totals = {name: np.zeros(len(raw)) for name in ("late", "review")}
+    # Group positional indices, preserving the caller's index and row order.
+    for seller, positions in raw.groupby("seller_id").indices.items():
+        history = lookups["seller_history"].get(seller)
+        if history is None:
+            continue
+        for name in ("late", "review"):
+            counts[name][positions], totals[name][positions] = _past_totals(history[name], dates.iloc[positions])
+
+    k = lookups.get("smoothing_k", SMOOTHING_K)
+    return pd.DataFrame({
+        "seller_n_orders": counts["late"],
+        "seller_late_rate": laplace_smooth(totals["late"], counts["late"], priors["late"], k),
+        "seller_avg_review": laplace_smooth(totals["review"], counts["review"], priors["review"], k),
+    }, index=raw.index)
 
 # ---------------------------------------------------------------------------
 # Helper tinh khoang cach
@@ -133,16 +198,18 @@ def seller_features(raw: pd.DataFrame, lookups: dict) -> pd.DataFrame:
     """
     Seller reliability.
 
-    Training: train.py has already computed these columns using ONLY the past,
-              so we just pass them through.
-    Serving : look the seller up in the saved full-history table and apply the
-              same Laplace smoothing.  Unknown seller -> platform average.
+    Training passes through features computed strictly before each purchase.
+    New serving artifacts use the same availability-indexed histories.
     """
     cols = ["seller_n_orders", "seller_late_rate", "seller_avg_review"]
 
     if "seller_n_orders" in raw.columns:                       # training path
         return raw[cols].astype(float)
 
+    if "seller_history" in lookups:
+        return historical_seller_features(raw, lookups)
+
+    # Compatibility with older artifacts until the refreshed model is loaded.
     stats = lookups["seller_stats"].reindex(raw["seller_id"].values)   # serving path
     n     = stats["n"].fillna(0).values
     k     = lookups.get("smoothing_k", SMOOTHING_K)

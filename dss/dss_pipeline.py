@@ -1,4 +1,5 @@
 import json
+import inspect
 import os
 import duckdb
 import joblib
@@ -7,7 +8,10 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
-from dss.features import FEATURES, MIN_CATEGORY_COUNT, SMOOTHING_K, build_features, laplace_smooth
+from dss.features import (
+    FEATURES, MIN_CATEGORY_COUNT, REVIEW_LAG_DAYS,
+    build_features, build_history_lookups, historical_seller_features,
+)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WAREHOUSE = os.path.join(os.path.dirname(_HERE), "data_warehouse")
@@ -24,9 +28,9 @@ SALES_FORECAST_PATH = os.path.join(OUT_DIR, "sales_forecast.json")
 
 TRAIN_END = "2018-05-01"
 VALID_END = "2018-07-01"
-REVIEW_LAG_DAYS = 7
 BACKTEST_START = "2017-09"
 BACKTEST_END = "2018-08"
+BACKTEST_ESTIMATORS = 500
 BASELINE_COLS = ["promised_days", "distance_km"]
 
 PARAMS = dict(
@@ -69,6 +73,29 @@ SALES_PARAMS = dict(
 )
 
 
+def validate_date_dimension(con) -> dict:
+    """Refuse incomplete/duplicate date dimensions before any DSS date join."""
+    dates = f"'{_WAREHOUSE}/dim_date/*.parquet'"
+    fact = f"'{_WAREHOUSE}/fact_order_items/*.parquet'"
+    count, unique, first, last, invalid = con.execute(f"""
+        SELECT COUNT(*), COUNT(DISTINCT date_key), MIN(full_date), MAX(full_date),
+            COUNT(*) FILTER (WHERE date_key IS NULL OR full_date IS NULL
+                OR date_key != CAST(STRFTIME(full_date, '%Y%m%d') AS INTEGER))
+        FROM {dates}
+    """).fetchone()
+    if not count or count != unique or invalid or count != (last - first).days + 1:
+        raise ValueError("dim_date must be a complete calendar with unique YYYYMMDD keys. Run python -m etl again.")
+    missing = {}
+    for key in ("purchase_date_key", "estimated_date_key", "delivered_date_key"):
+        missing[key] = con.execute(f"""
+            SELECT COUNT(*) FROM {fact} f LEFT JOIN {dates} d ON f.{key}=d.date_key
+            WHERE f.{key} IS NOT NULL AND d.date_key IS NULL
+        """).fetchone()[0]
+    if any(missing.values()):
+        raise ValueError(f"dim_date has unresolved fact date keys: {missing}. Run python -m etl again.")
+    return {"rows": count, "first_date": str(first), "last_date": str(last), "orphan_items": missing}
+
+
 def load_data() -> pd.DataFrame:
     SQL = f"""
     SELECT
@@ -107,8 +134,20 @@ def load_data() -> pd.DataFrame:
     """
     print("Load data ...")
     con = duckdb.connect()
-    items_df = con.execute(SQL).df()
-    con.close()
+    try:
+        date_info = validate_date_dimension(con)
+        expected = con.execute(f"SELECT COUNT(*) FROM '{_WAREHOUSE}/fact_order_items/*.parquet' WHERE order_status='delivered' AND delivery_delay_days IS NOT NULL").fetchone()[0]
+        items_df = con.execute(SQL).df()
+    finally:
+        con.close()
+    if len(items_df) != expected:
+        raise ValueError(f"DSS dimension joins changed eligible item count: {expected} -> {len(items_df)}. Rebuild the warehouse.")
+    if items_df[["purchase_date", "estimated_date", "delivered_date"]].isna().any().any():
+        raise ValueError("Delivered training orders require all three resolved dates.")
+    actual_delay = (items_df["delivered_date"] - items_df["estimated_date"]).dt.days
+    if not actual_delay.eq(items_df["delivery_delay_days"]).all():
+        raise ValueError("delivery_delay_days disagrees with dates resolved through dim_date.")
+    items_df.attrs["date_dimension"] = date_info
     print(f"        {len(items_df):,} order-item rows loaded")
     return items_df
 
@@ -152,6 +191,7 @@ def build_order_table(items_df: pd.DataFrame) -> pd.DataFrame:
     df["purchase_date"] = pd.to_datetime(df["purchase_date"])
     df["delivered_date"] = pd.to_datetime(df["delivered_date"])
     df = df.sort_values("purchase_date").reset_index(drop=True)
+    df.attrs.update(items_df.attrs)
     print(f"        {len(df):,} orders")
     return df
 
@@ -162,73 +202,39 @@ def add_target(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def global_rates(df: pd.DataFrame) -> dict:
-    return {
-        "late": float(df["late"].mean()),
-        "review": float(df["review_score"].fillna(3.0).mean()),
-    }
-
-
-def past_seller_stats(df: pd.DataFrame, value_col: str, lag_days: int = 0):
-    counts = np.zeros(len(df))
-    sums = np.zeros(len(df))
-    lag = pd.Timedelta(days=lag_days)
-
-    for _, group in df.groupby("seller_id"):
-        idx = group.index.values
-        known_at = (group["delivered_date"] + lag).values
-        values = group[value_col].values.astype(float)
-        purchased = group["purchase_date"].values
-
-        was_known = known_at[None, :] < purchased[:, None]
-        counts[idx] = was_known.sum(axis=1)
-        sums[idx] = was_known @ values
-    return counts, sums
-
-
 def add_seller_history(df: pd.DataFrame) -> pd.DataFrame:
     print("Add seller history ...")
-    avg = global_rates(df)
-    df["review_filled"] = df["review_score"].fillna(avg["review"])
-
-    n_late, sum_late = past_seller_stats(df, "late", lag_days=0)
-    n_rev, sum_rev = past_seller_stats(df, "review_filled", lag_days=REVIEW_LAG_DAYS)
-
-    df["seller_n_orders"] = n_late
-    df["seller_late_rate"] = laplace_smooth(sum_late, n_late, avg["late"])
-    df["seller_avg_review"] = laplace_smooth(sum_rev, n_rev, avg["review"])
-    print(f"        Orders with seller history: {(n_late > 0).sum():,}")
+    history = historical_seller_features(df, build_history_lookups(df))
+    df[history.columns] = history
+    print(f"        Orders with seller history: {(df['seller_n_orders'] > 0).sum():,}")
     return df
 
 
-def build_lookups(df: pd.DataFrame) -> dict:
-    seller_stats = df.groupby("seller_id").agg(
-        n=("late", "size"),
-        late_sum=("late", "sum"),
-        review_sum=("review_filled", "sum"),
-    )
-
+def build_lookups(df: pd.DataFrame, include_history: bool = True) -> dict:
     cat_counts = df["category"].value_counts()
     valid_categories = sorted(cat_counts[cat_counts >= MIN_CATEGORY_COUNT].index.tolist())
     valid_categories.append("other")
 
     lookups = {
-        "seller_stats": seller_stats,
-        "global_rates": global_rates(df),
-        "smoothing_k": SMOOTHING_K,
         "categories": {
             "customer_state": sorted(df["c_state"].dropna().unique().tolist()) + ["UNK"],
             "seller_state": sorted(df["s_state"].dropna().unique().tolist()) + ["UNK"],
             "category": valid_categories,
         },
     }
-    print(f"        {len(seller_stats):,} sellers, {len(valid_categories) - 1} categories")
+    if include_history:
+        lookups.update(build_history_lookups(df))
+    print(f"        {df['seller_id'].nunique():,} sellers, {len(valid_categories) - 1} categories")
     return lookups
 
 
-def split_by_time(when: pd.Series):
-    is_train = (when < TRAIN_END).values
-    is_valid = ((when >= TRAIN_END) & (when < VALID_END)).values
+def known_before(when: pd.Series, delivered: pd.Series, cutoff):
+    return ((when < cutoff) & (delivered < cutoff)).to_numpy()
+
+
+def split_by_time(when: pd.Series, delivered: pd.Series):
+    is_train = known_before(when, delivered, TRAIN_END)
+    is_valid = ((when >= TRAIN_END) & (when < VALID_END) & (delivered < VALID_END)).values
     is_test = (when >= VALID_END).values
     print(f"        Train/Valid/Test: {is_train.sum():,}/{is_valid.sum():,}/{is_test.sum():,}")
     return is_train, is_valid, is_test
@@ -236,9 +242,14 @@ def split_by_time(when: pd.Series):
 
 def train_model(X, y, is_train, is_valid):
     model = lgb.LGBMClassifier(**PARAMS)
+    validation = (
+        {"eval_X": X[is_valid], "eval_y": y[is_valid]}
+        if "eval_X" in inspect.signature(model.fit).parameters
+        else {"eval_set": [(X[is_valid], y[is_valid])]}
+    )
     model.fit(
         X[is_train], y[is_train],
-        eval_X=X[is_valid], eval_y=y[is_valid],
+        **validation,
         eval_metric="auc",
         callbacks=[lgb.early_stopping(100, verbose=False)],
     )
@@ -255,12 +266,12 @@ def score_set(y, mask, proba) -> dict:
     }
 
 
-def baseline_inputs(X: pd.DataFrame) -> pd.DataFrame:
-    return X[BASELINE_COLS].fillna(X[BASELINE_COLS].median())
+def baseline_inputs(X: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    return X[BASELINE_COLS].fillna(reference[BASELINE_COLS].median()).fillna(0.0)
 
 
 def evaluate(model, X, y, is_train, is_valid, is_test) -> dict:
-    Xb = baseline_inputs(X)
+    Xb = baseline_inputs(X, X[is_train])
     baseline = LogisticRegression(max_iter=500).fit(Xb[is_train], y[is_train])
 
     metrics = {
@@ -274,22 +285,28 @@ def evaluate(model, X, y, is_train, is_valid, is_test) -> dict:
     return metrics
 
 
-def run_backtest(X, y, when, final_params):
-    Xb = baseline_inputs(X)
+def run_backtest(df):
+    when, delivered = df["purchase_date"], df["delivered_date"]
+    y = df["late"].to_numpy()
     all_pred, all_actual, by_month = [], [], []
 
     for month in pd.period_range(BACKTEST_START, BACKTEST_END, freq="M"):
-        before = (when < month.start_time).values
+        before = known_before(when, delivered, month.start_time)
         this_month = ((when >= month.start_time) & (when < (month + 1).start_time)).values
 
         if before.sum() < 200 or this_month.sum() < 10:
             continue
 
-        m_lgbm = lgb.LGBMClassifier(**final_params).fit(X[before], y[before])
-        m_base = LogisticRegression(max_iter=500).fit(Xb[before], y[before])
+        lookups = build_lookups(df[before], include_history=False)
+        X_train = build_features(df[before], lookups)
+        X_month = build_features(df[this_month], lookups)
+        # Fixed before backtesting; never reuse an iteration count tuned in later months.
+        params = {**PARAMS, "n_estimators": BACKTEST_ESTIMATORS}
+        m_lgbm = lgb.LGBMClassifier(**params).fit(X_train, y[before])
+        m_base = LogisticRegression(max_iter=500).fit(baseline_inputs(X_train, X_train), y[before])
 
-        pred_lgbm = m_lgbm.predict_proba(X[this_month])[:, 1]
-        pred_base = m_base.predict_proba(Xb[this_month])[:, 1]
+        pred_lgbm = m_lgbm.predict_proba(X_month)[:, 1]
+        pred_base = m_base.predict_proba(baseline_inputs(X_month, X_train))[:, 1]
 
         by_month.append({
             "month": str(month),
@@ -388,6 +405,7 @@ def save_examples(df, is_test):
 
 
 def load_daily_sales() -> pd.DataFrame:
+    """Aggregate purchase facts only; future delivery/estimate calendar days are not sales."""
     SQL = f"""
     SELECT
         dp.full_date AS date,
@@ -401,8 +419,11 @@ def load_daily_sales() -> pd.DataFrame:
     """
     print("Load daily sales ...")
     con = duckdb.connect()
-    daily = con.execute(SQL).df()
-    con.close()
+    try:
+        validate_date_dimension(con)
+        daily = con.execute(SQL).df()
+    finally:
+        con.close()
     print(f"        {len(daily):,} days loaded")
     return daily
 
@@ -605,13 +626,13 @@ def run_late_delivery_pipeline():
     print("\nSTEP 1-5  Preparing data ...")
     df = add_target(build_order_table(load_data()))
     df = add_seller_history(df)
-    lookups = build_lookups(df)
 
     print("\nSTEP 6  Building features ...")
-    X = build_features(df, lookups)
     y = df["late"].values
     when = df["purchase_date"]
-    is_train, is_valid, is_test = split_by_time(when)
+    is_train, is_valid, is_test = split_by_time(when, df["delivered_date"])
+    lookups = build_lookups(df[is_train], include_history=False)
+    X = build_features(df, lookups)
 
     print("\nSTEP 7  Training ...")
     model = train_model(X, y, is_train, is_valid)
@@ -619,14 +640,23 @@ def run_late_delivery_pipeline():
 
     print("\nSTEP 8  Evaluating ...")
     metrics = evaluate(model, X, y, is_train, is_valid, is_test)
+    metrics["data_window"] = {
+        "orders": len(df), "purchase_from": str(when.min().date()),
+        "purchase_to": str(when.max().date()),
+        "delivery_to": str(df["delivered_date"].max().date()),
+        "date_dimension": df.attrs["date_dimension"],
+        "review_lag_days": REVIEW_LAG_DAYS,
+    }
 
     print("\nSTEP 9  Backtest ...")
-    metrics["backtest"], all_pred, all_actual = run_backtest(X, y, when, final_params)
+    metrics["backtest"], all_pred, all_actual = run_backtest(df)
 
     print("\nSTEP 10  Risk tiers ...")
     metrics["risk_tiers"], metrics["tier_thresholds"] = make_risk_tiers(all_pred, all_actual)
 
     print("\nSTEP 11  Final model ...")
+    lookups = build_lookups(df)
+    X = build_features(df, lookups)
     final_model, metrics["feature_importance"] = fit_final_model(X, y, final_params)
     save_late_artifacts(final_model, lookups, metrics)
 
