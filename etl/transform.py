@@ -81,12 +81,27 @@ def build_dim_product(raw_products: DataFrame, raw_translations: DataFrame) -> D
 
 
 def build_dim_date(raw_orders: DataFrame) -> DataFrame:
-    """Build role-playing dim_date extracted from all purchase dates."""
-    return (
+    """Build a continuous calendar covering purchase, delivery and estimate dates."""
+    date_columns = (
+        "order_purchase_timestamp",
+        "order_delivered_customer_date",
+        "order_estimated_delivery_date",
+    )
+    date_bounds = (
         raw_orders
-        .select(F.to_date("order_purchase_timestamp").alias("full_date"))
-        .filter(F.col("full_date").isNotNull())
-        .distinct()
+        .select(F.explode(F.array(*[F.to_date(column) for column in date_columns])).alias("full_date"))
+        .agg(
+            F.min("full_date").alias("min_date"),
+            F.max("full_date").alias("max_date"),
+        )
+        .filter(F.col("min_date").isNotNull())
+    )
+
+    return (
+        date_bounds
+        .select(
+            F.explode(F.sequence("min_date", "max_date", F.expr("INTERVAL 1 DAY"))).alias("full_date")
+        )
         .withColumn("date_key", F.date_format("full_date", "yyyyMMdd").cast("int"))
         .withColumn("year", F.year("full_date"))
         .withColumn("quarter", F.quarter("full_date"))

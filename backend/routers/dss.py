@@ -1,8 +1,10 @@
-from typing import Optional
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from typing import Any, Literal, Optional
+from datetime import date
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 import joblib
 import pandas as pd
+import re
 import sys
 import os
 
@@ -21,6 +23,8 @@ SALES_FORECAST_PATH = os.path.join(_ARTIFACTS, "sales_forecast.json")
 
 _late_model = None
 _sales_model = None
+MIN_SUPPORTED_DATE = date(1677, 9, 22)
+MAX_SUPPORTED_DATE = date(2262, 4, 11)
 
 
 def load_late_model():
@@ -42,16 +46,16 @@ def load_sales_model():
 
 
 class LateDeliveryRequest(BaseModel):
-    purchase_date: str
-    estimated_date: str
+    purchase_date: date = Field(ge=MIN_SUPPORTED_DATE, le=MAX_SUPPORTED_DATE, description="Purchase date in YYYY-MM-DD format")
+    estimated_date: date = Field(ge=MIN_SUPPORTED_DATE, le=MAX_SUPPORTED_DATE, description="Estimated delivery date, on or after purchase_date")
     seller_id: str
     category: str
-    n_items: int
-    total_price: float
-    total_freight: float
-    total_weight_g: Optional[float] = None
-    total_volume_cm3: Optional[float] = None
-    max_dim_cm: Optional[float] = None
+    n_items: int = Field(gt=0, strict=True, description="Positive integer item count")
+    total_price: float = Field(ge=0, allow_inf_nan=False, description="Non-negative product price total")
+    total_freight: float = Field(ge=0, allow_inf_nan=False, description="Non-negative freight total")
+    total_weight_g: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    total_volume_cm3: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    max_dim_cm: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
     c_lat: Optional[float] = None
     c_lng: Optional[float] = None
     c_state: str
@@ -59,8 +63,66 @@ class LateDeliveryRequest(BaseModel):
     s_lng: Optional[float] = None
     s_state: str
 
+    @field_validator("purchase_date", "estimated_date", mode="before")
+    @classmethod
+    def parse_calendar_date(cls, value):
+        if type(value) is date:
+            return value
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError("Ngày phải có định dạng YYYY-MM-DD.")
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            raise ValueError("Ngày không tồn tại trong lịch.") from None
 
-@router.post("/predict-late-delivery")
+    @field_validator("estimated_date")
+    @classmethod
+    def check_delivery_window(cls, value: date, info: ValidationInfo):
+        purchase = info.data.get("purchase_date")
+        if purchase is not None:
+            days = (value - purchase).days
+            if days < 0:
+                raise ValueError("Ngày hẹn giao phải bằng hoặc sau ngày mua.")
+            if days > pd.Timedelta.max.days:
+                raise ValueError("Khoảng thời gian giao hàng vượt giới hạn hỗ trợ.")
+        return value
+
+
+class RiskThresholds(BaseModel):
+    medium: float
+    high: float
+
+
+class LateDeliveryResponse(BaseModel):
+    late_probability: float
+    risk_tier: Literal["low", "medium", "high"]
+    thresholds: RiskThresholds
+
+
+class ForecastPoint(BaseModel):
+    date: str
+    forecast: float
+    lo: float
+    hi: float
+    event: bool
+
+
+class SalesForecastResponse(BaseModel):
+    target: Literal["orders", "gmv"]
+    horizon_days: int
+    forecast: list[ForecastPoint]
+
+
+class ExampleOrder(LateDeliveryRequest):
+    actual_late: bool = Field(alias="_actual_late")
+
+
+class ExampleOrdersResponse(BaseModel):
+    examples: list[ExampleOrder]
+    count: int
+
+
+@router.post("/predict-late-delivery", response_model=LateDeliveryResponse)
 def predict_late_delivery(req: LateDeliveryRequest):
     """
     Predicts the probability that an order will be delivered late
@@ -70,10 +132,9 @@ def predict_late_delivery(req: LateDeliveryRequest):
 
     artefact = load_late_model()
 
-    purchase = pd.to_datetime(req.purchase_date)
     raw = pd.DataFrame([{
-        "purchase_date": req.purchase_date,
-        "estimated_date": req.estimated_date,
+        "purchase_date": req.purchase_date.isoformat(),
+        "estimated_date": req.estimated_date.isoformat(),
         "seller_id": req.seller_id,
         "category": req.category,
         "n_items": req.n_items,
@@ -88,7 +149,7 @@ def predict_late_delivery(req: LateDeliveryRequest):
         "s_lat": req.s_lat,
         "s_lng": req.s_lng,
         "s_state": req.s_state,
-        "purchase_month": purchase.month,
+        "purchase_month": req.purchase_date.month,
     }])
 
     X = build_features(raw, artefact["lookups"])
@@ -109,15 +170,12 @@ def predict_late_delivery(req: LateDeliveryRequest):
     }
 
 
-@router.get("/sales-forecast")
-def get_sales_forecast(target: str = "orders"):
+@router.get("/sales-forecast", response_model=SalesForecastResponse)
+def get_sales_forecast(target: Literal["orders", "gmv"] = Query("orders", description="Forecast target")):
     """
     Returns the 28-day sales forecast for orders or GMV.
     Target: 'orders' or 'gmv'
     """
-    if target not in ["orders", "gmv"]:
-        raise HTTPException(status_code=400, detail="Target must be 'orders' or 'gmv'")
-
     import json
     if not os.path.exists(SALES_FORECAST_PATH):
         raise HTTPException(status_code=503, detail="Forecast not available. Run dss_pipeline.py first.")
@@ -135,7 +193,7 @@ def get_sales_forecast(target: str = "orders"):
     }
 
 
-@router.get("/sales-metrics")
+@router.get("/sales-metrics", response_model=dict[str, Any])
 def get_sales_metrics():
     """
     Returns sales forecast model performance metrics.
@@ -152,7 +210,7 @@ def get_sales_metrics():
     return metrics
 
 
-@router.get("/late-delivery-metrics")
+@router.get("/late-delivery-metrics", response_model=dict[str, Any])
 def get_late_delivery_metrics():
     """
     Returns late delivery model performance metrics.
@@ -169,7 +227,7 @@ def get_late_delivery_metrics():
     return metrics
 
 
-@router.get("/example-orders")
+@router.get("/example-orders", response_model=ExampleOrdersResponse)
 def get_example_orders():
     """
     Returns example orders for testing the late delivery prediction API.
