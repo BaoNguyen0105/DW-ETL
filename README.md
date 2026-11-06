@@ -80,7 +80,7 @@ python -m dss
 
 ---
 
-## 🎨 3. Dành cho bạn làm Frontend (UI / Dashboard)
+## 🎨 3. Frontend (UI / Dashboard)
 
 Backend viết bằng FastAPI, đã bật sẵn **CORS** cho mọi domain (`allow_origins=["*"]`). Bạn có thể dùng Streamlit, React, Next.js, Vue hoặc HTML/JS thuần tùy ý.
 
@@ -304,7 +304,89 @@ Dùng để hiển thị bảng đánh giá độ chính xác của các mô hì
 
 ---
 
-## 📐 4. Star Schema Reference (Cấu trúc Bảng)
+## 🚀 4. Hướng dẫn chạy Frontend sau khi pull code
+
+Frontend nằm trong `frontend/`, sử dụng **React + Vite + TypeScript + Tailwind CSS + shadcn/ui**. Hướng dẫn này dành cho môi trường đã hoàn tất ETL, có warehouse và artifacts DSS, đồng thời backend đang chạy.
+
+### A. Điều kiện trước khi chạy
+
+- Cài **Node.js 24.x** cùng npm. Phiên bản đã kiểm thử trên project là Node.js `24.16.0`.
+- Giữ backend đang chạy tại `http://127.0.0.1:8000`. Có thể mở [Swagger API](http://127.0.0.1:8000/docs) để kiểm tra kết nối.
+- Mở **terminal mới tại thư mục gốc `DW-ETL`** để chạy frontend, đồng thời giữ terminal backend hoạt động.
+
+Kiểm tra Node.js và npm trong terminal mới.
+
+```powershell
+node --version
+npm.cmd --version
+```
+
+Các lệnh bên dưới dùng PowerShell trên Windows. Với macOS/Linux, sử dụng `npm` ở vị trí `npm.cmd`.
+
+### B. Cài dependencies và khởi động
+
+Từ thư mục gốc `DW-ETL`, cập nhật code rồi cài dependencies frontend theo `package-lock.json`.
+
+```powershell
+git pull
+cd frontend
+npm.cmd ci
+```
+
+Đợi cài đặt thành công rồi khởi động Vite.
+
+```powershell
+npm.cmd run dev -- --strictPort
+```
+
+Khi terminal hiện địa chỉ `http://127.0.0.1:5173/`, mở [Olist Insight](http://127.0.0.1:5173/) trên trình duyệt. Giữ cả hai terminal backend và frontend hoạt động trong lúc sử dụng.
+
+Vite đã cấu hình proxy `/api` tới `http://127.0.0.1:8000`. Với backend ở địa chỉ mặc định, giữ `VITE_API_BASE_URL` trống để dùng proxy này.
+
+### C. Các trang có thể sử dụng
+
+| Trang | Đường dẫn | Thao tác chính |
+| --- | --- | --- |
+| Overview | `/` | Xem KPI, xu hướng doanh thu, ngành hàng và phân bố địa lý. Lọc theo năm, bang và ngành hàng. |
+| OLAP Analytics | `/olap` | Chuyển cấp năm/quý/tháng, chọn mẫu Roll-Up, Drill-Down, Slice hoặc Dice và chạy truy vấn. |
+| Delivery Risk | `/delivery-risk` | Chọn đơn hàng mẫu hoặc nhập form, bấm dự đoán và xem xác suất cùng mức rủi ro giao trễ. |
+| Sales Forecast | `/sales-forecast` | Chọn số đơn hoặc GMV, xem dự báo 28 ngày, khoảng dự báo và model metrics. |
+
+### D. Khi backend chạy ở địa chỉ khác
+
+Trong thư mục `frontend/`, tạo `.env.local` dựa trên `.env.example` và điền địa chỉ API của backend. Ví dụ dưới dùng backend ở cổng `8001`.
+
+```dotenv
+VITE_API_BASE_URL=http://127.0.0.1:8001/api
+```
+
+Địa chỉ phải kết thúc bằng `/api`. Nếu backend ở máy khác, dùng IP hoặc domain truy cập được của máy đó. Sau khi sửa `.env.local`, dừng Vite bằng **Ctrl+C** rồi chạy lại `npm.cmd run dev -- --strictPort` để nạp cấu hình mới.
+
+### E. Những lần mở ứng dụng tiếp theo
+
+Khi dependencies đã được cài và backend đang hoạt động, chạy từ thư mục gốc project.
+
+```powershell
+cd frontend
+npm.cmd run dev -- --strictPort
+```
+
+Sau khi pull các thay đổi của `package.json` hoặc `package-lock.json`, chạy lại `npm.cmd ci` trong `frontend/` trước khi mở Vite. Dùng **Ctrl+C** tại terminal frontend để dừng ứng dụng.
+
+### F. Xử lý lỗi thường gặp
+
+| Hiện tượng | Cách xử lý |
+| --- | --- |
+| Terminal báo chưa nhận diện `node` hoặc `npm.cmd` | Cài Node.js 24.x kèm npm, mở lại terminal rồi kiểm tra phiên bản. |
+| PowerShell chặn `npm.ps1` | Dùng `npm.cmd` như các lệnh trong hướng dẫn. |
+| Báo `Port 5173 is already in use` | Kiểm tra phiên frontend đang chạy. Dùng phiên đó hoặc dừng bằng Ctrl+C rồi khởi động lại. |
+| Giao diện báo mất kết nối hoặc lỗi proxy | Kiểm tra backend đang chạy ở cổng `8000` và giá trị `VITE_API_BASE_URL` nếu đã cấu hình riêng. |
+
+Hướng dẫn cấu trúc frontend, build và kiểm thử nằm trong [frontend/README.md](frontend/README.md).
+
+---
+
+## 📐 5. Star Schema Reference (Cấu trúc Bảng)
 
 Mô hình dữ liệu Star Schema chuẩn Ralph Kimball được lưu trữ tại [docs/schema.png](docs/schema.png) và định nghĩa mã nguồn Mermaid tại [docs/schema.mmd](docs/schema.mmd):
 
