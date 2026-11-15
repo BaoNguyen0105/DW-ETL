@@ -1,4 +1,7 @@
 # Raw data, generated warehouse and trained models
+/data/dataset/
+/data/data_warehouse/
+/src/dss/artifacts/
 /dataset/
 /data_warehouse/
 /dss/artifacts/

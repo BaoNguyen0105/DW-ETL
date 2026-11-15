@@ -1,10 +1,11 @@
 import os
 import duckdb
 
-# Determine the absolute path to data_warehouse/
+# Determine the absolute path to data/data_warehouse/
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-DW_DIR = os.path.join(PROJECT_ROOT, "data_warehouse").replace("\\", "/")
+SRC_DIR = os.path.dirname(CURRENT_DIR)
+PROJECT_ROOT = os.path.dirname(SRC_DIR)
+DW_DIR = os.path.join(PROJECT_ROOT, "data", "data_warehouse").replace("\\", "/")
 
 
 def get_db_connection() -> duckdb.DuckDBPyConnection:

@@ -4,19 +4,30 @@ import subprocess
 import re
 
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.dirname(_HERE)
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+
+
 def activate_local_tools():
     """Tự động ưu tiên sử dụng JDK 17 và Hadoop trong thư mục tools/ nếu có sẵn."""
-    local_jdk = os.path.abspath("tools/jdk-17")
+    local_jdk = os.path.join(_PROJECT_ROOT, "tools", "jdk-17")
+    if not os.path.exists(local_jdk):
+        local_jdk = os.path.abspath("tools/jdk-17")
     if os.path.exists(local_jdk):
         os.environ["JAVA_HOME"] = local_jdk
         # Đưa bin của JDK 17 lên vị trí ĐẦU TIÊN trong PATH để ghi đè các Java khác trên máy
         os.environ["PATH"] = os.path.join(local_jdk, "bin") + os.pathsep + os.environ.get("PATH", "")
 
-    local_hadoop = os.path.abspath("tools/hadoop")
+    local_hadoop = os.path.join(_PROJECT_ROOT, "tools", "hadoop")
+    if not os.path.exists(local_hadoop):
+        local_hadoop = os.path.abspath("tools/hadoop")
     if os.path.exists(local_hadoop):
         os.environ["HADOOP_HOME"] = local_hadoop
 
-    local_conf = os.path.abspath("conf")
+    local_conf = os.path.join(_PROJECT_ROOT, "conf")
+    if not os.path.exists(local_conf):
+        local_conf = os.path.abspath("conf")
     if os.path.exists(local_conf):
         os.environ["SPARK_CONF_DIR"] = local_conf
 

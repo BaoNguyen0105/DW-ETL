@@ -1,3 +1,11 @@
+import os
+import sys
+
+# Ensure backend directory is in sys.path so 'from routers import ...' always resolves
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import olap, dss

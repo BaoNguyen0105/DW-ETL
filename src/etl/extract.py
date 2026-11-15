@@ -1,4 +1,10 @@
+import os
 from pyspark.sql import SparkSession, DataFrame
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.dirname(_HERE)
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+_DEFAULT_DATASET_DIR = os.path.join(_PROJECT_ROOT, "data", "dataset").replace("\\", "/")
 
 
 def get_spark_session(app_name: str = "Olist-DW-ETL") -> SparkSession:
@@ -16,8 +22,15 @@ def get_spark_session(app_name: str = "Olist-DW-ETL") -> SparkSession:
     return spark
 
 
-def extract(spark: SparkSession, dataset_dir: str = "dataset") -> dict[str, DataFrame]:
+def extract(spark: SparkSession, dataset_dir: str = _DEFAULT_DATASET_DIR) -> dict[str, DataFrame]:
     """Read all required raw CSV datasets into Spark DataFrames."""
+    if not os.path.isabs(dataset_dir):
+        candidate = os.path.join(_PROJECT_ROOT, dataset_dir).replace("\\", "/")
+        if os.path.exists(candidate):
+            dataset_dir = candidate
+        elif os.path.exists(os.path.join(_PROJECT_ROOT, "data", dataset_dir)):
+            dataset_dir = os.path.join(_PROJECT_ROOT, "data", dataset_dir).replace("\\", "/")
+
     print(f">>> [1/3] Extracting raw datasets from '{dataset_dir}'...")
 
     data = {

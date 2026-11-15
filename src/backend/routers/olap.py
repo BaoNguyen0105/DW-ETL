@@ -1,6 +1,13 @@
+import os
+import sys
 from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 from database import get_db_connection
 
 router = APIRouter()

@@ -14,7 +14,9 @@ from dss.features import (
 )
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_WAREHOUSE = os.path.join(os.path.dirname(_HERE), "data_warehouse")
+_SRC_DIR = os.path.dirname(_HERE)
+_PROJECT_ROOT = os.path.dirname(_SRC_DIR)
+_WAREHOUSE = os.path.join(_PROJECT_ROOT, "data", "data_warehouse")
 
 OUT_DIR = os.path.join(_HERE, "artifacts")
 os.makedirs(OUT_DIR, exist_ok=True)
